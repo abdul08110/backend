@@ -1,20 +1,20 @@
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
-
-// Determine current directory
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// Load .env from root directory
-dotenv.config({ path: path.resolve(__dirname, '../.env') });
-
 import mysql from 'mysql2/promise';
 
-// Debug check (optional)
-console.log('DB_USER:', process.env.DB_USER);
-console.log('DB_PASSWORD:', process.env.DB_PASSWORD);
+// ───── Load Environment Variables ─────
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
+// ───── Debug: Show DB credentials in development only ─────
+if (process.env.NODE_ENV === 'development') {
+  console.log('DB_USER:', process.env.DB_USER);
+  console.log('DB_PASSWORD:', process.env.DB_PASSWORD);
+}
+
+// ───── Create MySQL Connection Pool ─────
 const pool = mysql.createPool({
   host: process.env.DB_HOST,
   user: process.env.DB_USER,

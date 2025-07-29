@@ -1,0 +1,58 @@
+# Node dependencies
+node_modules/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# dotenv environment files
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# build output
+/build
+/dist
+
+# coverage reports
+coverage/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE settings
+.vscode/
+.idea/
+
+# TypeScript cache
+*.tsbuildinfo
+
+# Optional npm cache directory
+.npm
+
+# Local SQLite DB or other temp DB files
+*.sqlite
+*.sqlite3
+*.db
+
+# Mac system file
+.AppleDouble
+
+# Windows system file
+ehthumbs.db
+Desktop.ini
+
+# React specific (if using Create React App)
+*.env.production
+*.env.development
+*.env.test
+
+# Misc
+*.log
+*.bak
+*.tmp

@@ -1,85 +1,40 @@
+// controllers/auth.js
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
-import crypto from 'crypto';
-import nodemailer from 'nodemailer';
 import pool from '../config/db.js';
 
-const generateToken = () => crypto.randomBytes(32).toString('hex');
-
-const sendConfirmationEmail = async (email, token) => {
-  const transporter = nodemailer.createTransport({
-    service: 'Gmail',
-    auth: {
-      user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_PASS,
-    },
-  });
-
-  const confirmationLink = `${process.env.FRONTEND_URL}/confirm-email?token=${token}`;
-
-  await transporter.sendMail({
-    to: email,
-    subject: 'Confirm Your Email Address',
-    html: `
-  <div style="font-family: Arial, sans-serif; background-color: #f9f9f9; padding: 40px; text-align: center;">
-    <div style="max-width: 600px; margin: auto; background-color: #ffffff; padding: 30px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
-      <h2 style="color: #4f46e5;">Welcome to Quizora 👋</h2>
-      <p style="font-size: 16px; color: #333;">Thanks for signing up! Please confirm your email address to get started.</p>
-      <a href="${confirmationLink}" 
-         style="display: inline-block; margin-top: 20px; padding: 12px 24px; background-color: #4f46e5; color: white; text-decoration: none; border-radius: 6px; font-weight: bold;">
-         ✅ Confirm Email
-      </a>
-      <p style="margin-top: 30px; font-size: 13px; color: #888;">If you didn’t sign up, you can safely ignore this email.<br>This link will expire in 24 hours.</p>
-    </div>
-  </div>
-  `,
-  });
-};
+import { generateToken } from '../utils/token.js';
+import { sendConfirmationEmail, sendResetEmail } from '../utils/email.js';
 
 export const register = async (req, res) => {
   const { email, password, address, username, city, state, pincode, mobile } = req.body;
 
-  // Basic Validation
   if (!username || !email || !password) {
     return res.status(400).json({ error: 'Username, email, and password are required' });
   }
 
   try {
-    const [existingUser] = await pool.query(
-      'SELECT * FROM users WHERE email = ?',
-      [email]
-    );
+    const [existingUser] = await pool.query('SELECT * FROM users WHERE email = ?', [email]);
 
     const confirmationToken = generateToken();
     const tokenExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000)
-      .toISOString()
-      .slice(0, 19)
-      .replace('T', ' ');
-    //const tokenExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000).toLocaleString('en-US', { timeZone: 'Asia/Kolkata' });
+      .toISOString().slice(0, 19).replace('T', ' ');
 
     if (existingUser.length > 0) {
       const user = existingUser[0];
 
-      // ✅ Already confirmed
       if (user.is_confirmed) {
         return res.json({
           success: false,
           message: 'Email already confirmed. You can log in now.'
         });
-
-
       }
 
-      // 🔄 Not confirmed yet — just update token and expiry
       await pool.query(
-        `UPDATE users SET 
-         confirmation_token = ?, 
-         confirmation_token_expiry = ? 
-         WHERE email = ?`,
+        `UPDATE users SET confirmation_token = ?, confirmation_token_expiry = ? WHERE email = ?`,
         [confirmationToken, tokenExpiry, email]
       );
     } else {
-      // 🆕 First-time registration
       const hashedPassword = await bcrypt.hash(password, 10);
       await pool.query(
         `INSERT INTO users 
@@ -89,78 +44,47 @@ export const register = async (req, res) => {
       );
     }
 
-    // 📩 Send confirmation email
     await sendConfirmationEmail(email, confirmationToken);
-
     res.json({ success: true, message: 'Confirmation email sent' });
+
   } catch (err) {
-    console.error(err);
+    console.error('[ERROR] Register:', err);
     res.status(500).json({ error: 'Server error' });
   }
 };
 
 export const confirmEmail = async (req, res) => {
   const { token } = req.query;
-  console.log(`[DEBUG] Token received: ${token}`);
 
   try {
-    // 1. Find user with matching token (case-sensitive exact match)
     const [users] = await pool.query(
-      `SELECT * FROM users 
-             WHERE BINARY confirmation_token = ?`, // BINARY for exact match
+      `SELECT * FROM users WHERE BINARY confirmation_token = ?`,
       [token]
     );
 
-    console.log(`[DEBUG] Found ${users.length} matching users`);
-
     if (users.length === 0) {
-      console.log('[DEBUG] No user found with this token');
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid confirmation link'
-      });
+      return res.status(400).json({ success: false, error: 'Invalid confirmation link' });
     }
 
     const user = users[0];
+    const [dbTime] = await pool.query('SELECT NOW() AS current_time');
+    const now = new Date(dbTime[0].current_time);
+    const expiry = new Date(user.confirmation_token_expiry);
 
-    // 2. Check expiration (using database's local time)
-    const [dbTime] = await pool.query('SELECT NOW() AS `current_time`');
-    const currentDbTime = new Date(dbTime[0].current_time);
-    const expiryTime = new Date(user.confirmation_token_expiry);
-
-    console.log(`[DEBUG] Current DB time: ${currentDbTime}`);
-    console.log(`[DEBUG] Token expires: ${expiryTime}`);
-
-    if (expiryTime < currentDbTime) {
-      console.log('[DEBUG] Token expired');
-      return res.status(400).json({
-        success: false,
-        error: 'Confirmation link has expired'
-      });
+    if (expiry < now) {
+      return res.status(400).json({ success: false, error: 'Confirmation link has expired' });
     }
 
-    // 3. Update user (atomic operation)
     await pool.query(
-      `UPDATE users SET 
-             is_confirmed = 1,
-             confirmation_token = NULL,
-             confirmation_token_expiry = NULL
-             WHERE id = ?`,
+      `UPDATE users SET is_confirmed = 1, confirmation_token = NULL, confirmation_token_expiry = NULL WHERE id = ?`,
       [user.id]
     );
 
-    console.log('[DEBUG] User confirmed successfully');
-    return res.json({
-      success: true,
-      message: 'Email confirmed successfully'
-    });
+    res.json({ success: true, message: 'Email confirmed successfully' });
 
   } catch (err) {
-    console.error('[ERROR] Confirmation failed:', err);
-    return res.status(500).json({
-      success: false,
-      error: 'Server error during confirmation'
-    });
+    console.error('[ERROR] Email confirmation:', err);
+    res.status(500).json({ success: false, error: 'Server error during confirmation' });
   }
 };
 
@@ -168,68 +92,27 @@ export const login = async (req, res) => {
   const { email, password } = req.body;
 
   try {
-    const [user] = await pool.query('SELECT * FROM users WHERE email = ?', [
-      email,
-    ]);
+    const [user] = await pool.query('SELECT * FROM users WHERE email = ?', [email]);
 
-    if (!user[0]) {
-      return res.status(400).json({ error: 'Invalid credentials' });
-    }
+    if (!user[0]) return res.status(400).json({ error: 'Invalid credentials' });
 
     if (!user[0].is_confirmed) {
       return res.status(403).json({ error: 'Please confirm your email first' });
     }
 
     const isMatch = await bcrypt.compare(password, user[0].password);
-    if (!isMatch) {
-      return res.status(400).json({ error: 'Invalid credentials' });
-    }
+    if (!isMatch) return res.status(400).json({ error: 'Invalid credentials' });
 
-    const token = jwt.sign({ id: user[0].id }, process.env.JWT_SECRET, {
-      expiresIn: '1h',
-    });
+    const token = jwt.sign({ id: user[0].id }, process.env.JWT_SECRET, { expiresIn: '1h' });
 
-    res.json({
-      token,
-      name: user[0].username // Or whatever your column is in MySQL
-    });
+    res.json({ token, name: user[0].username });
+
   } catch (err) {
-    console.error(err);
+    console.error('[ERROR] Login:', err);
     res.status(500).json({ error: 'Server error' });
   }
 };
-// Send reset email
-const sendResetEmail = async (email, token) => {
-  const transporter = nodemailer.createTransport({
-    service: 'Gmail',
-    auth: {
-      user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_PASS,
-    },
-  });
 
-  const resetLink = `${process.env.FRONTEND_URL}/reset-password?token=${token}`;
-
-  await transporter.sendMail({
-    to: email,
-    subject: 'Reset Your Quizora Password',
-    html: `
-    <div style="font-family: Arial, sans-serif; background-color: #f9f9f9; padding: 40px; text-align: center;">
-      <div style="max-width: 600px; margin: auto; background-color: #ffffff; padding: 30px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
-        <h2 style="color: #4f46e5;">Password Reset Request 🔐</h2>
-        <p style="font-size: 16px; color: #333;">Click the button below to reset your password. This link will expire in 1 hour.</p>
-        <a href="${resetLink}" 
-           style="display: inline-block; margin-top: 20px; padding: 12px 24px; background-color: #4f46e5; color: white; text-decoration: none; border-radius: 6px; font-weight: bold;">
-           🔁 Reset Password
-        </a>
-        <p style="margin-top: 30px; font-size: 13px; color: #888;">If you didn't request this, ignore this email.</p>
-      </div>
-    </div>
-    `,
-  });
-};
-
-// ✅ Request password reset
 export const requestPasswordReset = async (req, res) => {
   const { email } = req.body;
 
@@ -243,11 +126,8 @@ export const requestPasswordReset = async (req, res) => {
     }
 
     const token = generateToken();
-    // const expiry = new Date(Date.now() + 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ');
-    const expiry = new Date(Date.now() + 24 * 60 * 60 * 1000)
-      .toISOString()
-      .slice(0, 19)
-      .replace('T', ' ');
+    const expiry = new Date(Date.now() + 60 * 60 * 1000)
+      .toISOString().slice(0, 19).replace('T', ' ');
 
     await pool.query(
       'UPDATE users SET reset_token = ?, reset_token_expiry = ? WHERE email = ?',
@@ -256,14 +136,14 @@ export const requestPasswordReset = async (req, res) => {
 
     await sendResetEmail(email, token);
 
-    return res.json({ success: true, message: 'Reset link sent to your email' });
+    res.json({ success: true, message: 'Reset link sent to your email' });
+
   } catch (err) {
-    console.error('[ERROR] Password reset request failed:', err);
-    return res.status(500).json({ error: 'Server error' });
+    console.error('[ERROR] Password reset request:', err);
+    res.status(500).json({ error: 'Server error' });
   }
 };
 
-// ✅ Reset password
 export const resetPassword = async (req, res) => {
   const { token, newPassword } = req.body;
 
@@ -284,16 +164,61 @@ export const resetPassword = async (req, res) => {
     const hashedPassword = await bcrypt.hash(newPassword, 10);
 
     await pool.query(
-      `UPDATE users 
-       SET password = ?, reset_token = NULL, reset_token_expiry = NULL 
-       WHERE id = ?`,
+      'UPDATE users SET password = ?, reset_token = NULL, reset_token_expiry = NULL WHERE id = ?',
       [hashedPassword, users[0].id]
     );
 
-    return res.json({ success: true, message: 'Password reset successful' });
+    res.json({ success: true, message: 'Password reset successful' });
+
   } catch (err) {
-    console.error('[ERROR] Reset failed:', err);
-    return res.status(500).json({ error: 'Server error' });
+    console.error('[ERROR] Reset password:', err);
+    res.status(500).json({ error: 'Server error' });
   }
 };
 
+export const checkEmailExists = async (req, res) => {
+  const { email } = req.body;
+  try {
+    const [user] = await pool.query('SELECT id FROM users WHERE email = ?', [email]);
+    res.json({ exists: user.length > 0 });
+  } catch (err) {
+    console.error('[ERROR] Email check failed:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+export const getCurrentUser = async (req, res) => {
+  try {
+    const [users] = await pool.query(
+      'SELECT username AS name, email, mobile FROM users WHERE id = ?',
+      [req.user.id]
+    );
+
+    if (users.length === 0) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+
+    res.json({ success: true, user: users[0] });
+
+  } catch (err) {
+    console.error('[AUTH /me ERROR]', err);
+    res.status(500).json({ success: false, error: 'Server error' });
+  }
+};
+
+export const checkContestRegistration = async (req, res) => {
+  const userId = req.user.id;
+  const { contest_id } = req.body;
+
+  try {
+    const [existing] = await pool.query(
+      'SELECT id FROM contest_registrations WHERE user_id = ? AND contest_id = ?',
+      [userId, contest_id]
+    );
+
+    res.json({ alreadyRegistered: existing.length > 0 });
+  } catch (err) {
+    console.error('[CHECK ERROR]', err);
+    res.status(500).json({ error: 'Error checking registration' });
+  }
+};
